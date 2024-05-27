@@ -7,7 +7,7 @@
 find_path(uring_INCLUDE_DIR
   NAMES liburing.h)
 find_library(uring_LIBRARIES
-  NAMES liburing.a liburing)
+  NAMES uring)
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(uring
