@@ -2862,6 +2862,48 @@ void rocksdb_batched_multi_get_cf_slice(
   delete[] statuses;
 }
 
+void rocksdb_batched_multi_get_multi_cf(rocksdb_t* db,
+                                        const rocksdb_readoptions_t* options,
+                                        size_t num_keys,
+                                        rocksdb_column_family_handle_t** column_families,
+                                        const char* const* keys_list,
+                                        const size_t* keys_list_sizes,
+                                        rocksdb_pinnableslice_t** values,
+                                        char** errs,
+                                        const bool sorted_input) {
+  Status* statuses = new Status[num_keys];
+  Slice* key_slices = new Slice[num_keys];
+  PinnableSlice* value_slices = new PinnableSlice[num_keys];
+  ColumnFamilyHandle **cfs = new ColumnFamilyHandle*[num_keys];
+  for (size_t i = 0; i < num_keys; ++i) {
+    key_slices[i] = Slice(keys_list[i], keys_list_sizes[i]);
+    cfs[i] = column_families[i]->rep;
+  }
+
+  db->rep->MultiGet(options->rep, num_keys, cfs, key_slices,
+                    value_slices, statuses, sorted_input);
+
+  for (size_t i = 0; i < num_keys; ++i) {
+    if (statuses[i].ok()) {
+      values[i] = new (rocksdb_pinnableslice_t);
+      values[i]->rep = std::move(value_slices[i]);
+      errs[i] = nullptr;
+    } else {
+      values[i] = nullptr;
+      if (!statuses[i].IsNotFound()) {
+        errs[i] = strdup(statuses[i].ToString().c_str());
+      } else {
+        errs[i] = nullptr;
+      }
+    }
+  }
+
+  delete[] cfs;
+  delete[] value_slices;
+  delete[] key_slices;
+  delete[] statuses;
+}
+
 unsigned char rocksdb_key_may_exist(rocksdb_t* db,
                                     const rocksdb_readoptions_t* options,
                                     const char* key, size_t key_len,
