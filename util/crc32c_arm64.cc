@@ -22,11 +22,23 @@
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #endif
+#if defined(__FreeBSD__)
+/* <sys/types.h> first: <sys/elf_common.h> is not self contained and uses
+   u_int32_t. <sys/auxv.h> declares elf_aux_info(), <sys/elf_common.h> defines
+   AT_HWCAP, and neither is reached through the getauxval path above. */
+#include <sys/types.h>
+
+#include <sys/auxv.h>
+#include <sys/elf_common.h>
+#endif
 #if defined(__OpenBSD__)
+/* <sys/types.h> first: <sys/sysctl.h> is not self contained and uses
+   u_int64_t. */
+#include <sys/types.h>
+
 #include <machine/armreg.h>
 #include <machine/cpu.h>
 #include <sys/sysctl.h>
-#include <sys/types.h>
 #endif
 
 #ifdef HAVE_ARM64_CRYPTO
