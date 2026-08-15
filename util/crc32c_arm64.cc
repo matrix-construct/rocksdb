@@ -40,6 +40,15 @@
 #include <machine/cpu.h>
 #include <sys/sysctl.h>
 #endif
+#if defined(__NetBSD__)
+/* <sys/types.h> first, as above. <aarch64/armreg.h> declares
+   struct aarch64_sysctl_cpu_id, the machdep.cpuN.cpu_id layout, along with the
+   ID_AA64ISAR0_EL1 field macros used to read it. */
+#include <sys/types.h>
+
+#include <aarch64/armreg.h>
+#include <sys/sysctl.h>
+#endif
 
 #ifdef HAVE_ARM64_CRYPTO
 /* unfolding to compute 8 * 3 = 24 bytes parallelly */
@@ -62,6 +71,21 @@
 #endif
 
 extern bool pmull_runtime_flag;
+
+#if defined(__NetBSD__)
+/* NetBSD exposes neither AT_HWCAP nor a machdep sysctl per ID register, but it
+   does export the whole set as one struct per CPU, which is where cpuctl(8)
+   reads the features it identifies a CPU by. */
+static bool netbsd_aa64isar0(uint64_t* isar0) {
+  struct aarch64_sysctl_cpu_id id;
+  size_t len = sizeof(id);
+
+  if (sysctlbyname("machdep.cpu0.cpu_id", &id, &len, NULL, 0) == -1)
+    return false;
+  *isar0 = id.ac_aa64isar0;
+  return true;
+}
+#endif
 
 uint32_t crc32c_runtime_check(void) {
 #if defined(ROCKSDB_AUXV_GETAUXVAL_PRESENT) || defined(__FreeBSD__)
@@ -87,6 +111,12 @@ uint32_t crc32c_runtime_check(void) {
     if (ID_AA64ISAR0_CRC32(isar0) >= ID_AA64ISAR0_CRC32_BASE) r = 1;
   }
   return r;
+#elif defined(__NetBSD__)
+  uint64_t isar0;
+
+  if (!netbsd_aa64isar0(&isar0)) return 0;
+  return __SHIFTOUT(isar0, ID_AA64ISAR0_EL1_CRC32) >=
+         ID_AA64ISAR0_EL1_CRC32_CRC32X;
 #else
   return 0;
 #endif
@@ -113,6 +143,11 @@ bool crc32c_pmull_runtime_check(void) {
     if (ID_AA64ISAR0_AES(isar0) >= ID_AA64ISAR0_AES_PMULL) r = true;
   }
   return r;
+#elif defined(__NetBSD__)
+  uint64_t isar0;
+
+  if (!netbsd_aa64isar0(&isar0)) return false;
+  return __SHIFTOUT(isar0, ID_AA64ISAR0_EL1_AES) >= ID_AA64ISAR0_EL1_AES_PMUL;
 #else
   return false;
 #endif
