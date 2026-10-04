@@ -16,6 +16,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -152,6 +153,7 @@ using ROCKSDB_NAMESPACE::Options;
 using ROCKSDB_NAMESPACE::PerfContext;
 using ROCKSDB_NAMESPACE::PerfLevel;
 using ROCKSDB_NAMESPACE::PinnableSlice;
+using ROCKSDB_NAMESPACE::PinnableWideColumns;
 using ROCKSDB_NAMESPACE::PrepopulateBlobCache;
 using ROCKSDB_NAMESPACE::RandomAccessFile;
 using ROCKSDB_NAMESPACE::Range;
@@ -191,6 +193,8 @@ using ROCKSDB_NAMESPACE::WaitForCompactOptions;
 using ROCKSDB_NAMESPACE::WalFile;
 using ROCKSDB_NAMESPACE::WalFilter;
 using ROCKSDB_NAMESPACE::WALRecoveryMode;
+using ROCKSDB_NAMESPACE::WideColumn;
+using ROCKSDB_NAMESPACE::WideColumns;
 using ROCKSDB_NAMESPACE::WritableFile;
 using ROCKSDB_NAMESPACE::WriteBatch;
 using ROCKSDB_NAMESPACE::WriteBatchWithIndex;
@@ -594,6 +598,12 @@ struct rocksdb_perfcontext_t {
 struct rocksdb_pinnableslice_t {
   PinnableSlice rep;
 };
+struct rocksdb_pinnablewidecolumns_t {
+  std::vector<PinnableWideColumns> rep;
+  std::vector<Status> statuses;
+  std::vector<ColumnFamilyHandle*> column_families;
+  std::vector<rocksdb_entity_t> entries;
+};
 struct rocksdb_transactiondb_options_t {
   TransactionDBOptions rep;
 };
@@ -666,6 +676,17 @@ struct rocksdb_compactionservice_scheduleresponse_t {
 struct rocksdb_compactionservice_jobinfo_t {
   CompactionServiceJobInfo rep;
 };
+
+// The entity API reads Slice and WideColumn arrays as their C mirrors.
+// Slice members are data_, size_; WideColumn members are name_, value_.
+static_assert(std::is_standard_layout_v<Slice>);
+static_assert(sizeof(Slice) == sizeof(rocksdb_slice_t));
+static_assert(std::is_standard_layout_v<WideColumn>);
+static_assert(sizeof(WideColumn) == sizeof(rocksdb_widecolumn_t));
+// rocksdb_entity_t.code is the Status code: 0 found, 1 not found.
+static_assert(Status::kOk == 0);
+static_assert(Status::kNotFound == 1);
+
 // Layout assertions: these structs must be reinterpret_cast-compatible
 // with their rep field (single-member struct, standard-layout).
 static_assert(sizeof(rocksdb_writebatch_t) == sizeof(WriteBatch),
@@ -2904,6 +2925,84 @@ void rocksdb_batched_multi_get_multi_cf(rocksdb_t* db,
   delete[] statuses;
 }
 
+rocksdb_pinnablewidecolumns_t* rocksdb_pinnablewidecolumns_create(void) {
+  return new rocksdb_pinnablewidecolumns_t;
+}
+
+void rocksdb_pinnablewidecolumns_destroy(
+    rocksdb_pinnablewidecolumns_t* result) {
+  delete result;
+}
+
+char* rocksdb_pinnablewidecolumns_status(
+    const rocksdb_pinnablewidecolumns_t* result, size_t index) {
+  return strdup(result->statuses[index].ToString().c_str());
+}
+
+static void ResizeEntities(rocksdb_pinnablewidecolumns_t* result, size_t n) {
+  // Slots past n keep their buffers for a wider read, but drop their pins.
+  for (size_t i = n; i < result->entries.size(); ++i) {
+    result->rep[i].Reset();
+  }
+  if (result->rep.size() < n) {
+    result->rep.resize(n);
+  }
+  // A read that fails before reaching its keys never writes their statuses.
+  result->statuses.assign(n, Status::Incomplete());
+  result->entries.resize(n);
+}
+
+static const rocksdb_entity_t* EntityEntries(
+    rocksdb_pinnablewidecolumns_t* result) {
+  for (size_t i = 0; i < result->entries.size(); ++i) {
+    const auto& columns = result->rep[i].columns();
+    result->entries[i] = {
+        reinterpret_cast<const rocksdb_widecolumn_t*>(columns.data()),
+        columns.size(), static_cast<unsigned char>(result->statuses[i].code())};
+  }
+  return result->entries.data();
+}
+
+const rocksdb_entity_t* rocksdb_get_entity_cf(
+    rocksdb_t* db, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* column_family, const char* key,
+    size_t keylen, rocksdb_pinnablewidecolumns_t* result) {
+  ResizeEntities(result, 1);
+  result->statuses[0] = db->rep->GetEntity(
+      options->rep, column_family->rep, Slice(key, keylen), &result->rep[0]);
+  return EntityEntries(result);
+}
+
+const rocksdb_entity_t* rocksdb_multi_get_entity_cf(
+    rocksdb_t* db, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* column_family, size_t num_keys,
+    const rocksdb_slice_t* keys, unsigned char sorted_input,
+    rocksdb_pinnablewidecolumns_t* result) {
+  ResizeEntities(result, num_keys);
+  db->rep->MultiGetEntity(
+      options->rep, column_family->rep, num_keys,
+      reinterpret_cast<const Slice*>(keys), result->rep.data(),
+      result->statuses.data(), sorted_input);
+  return EntityEntries(result);
+}
+
+const rocksdb_entity_t* rocksdb_multi_get_entity_multi_cf(
+    rocksdb_t* db, const rocksdb_readoptions_t* options, size_t num_keys,
+    rocksdb_column_family_handle_t* const* column_families,
+    const rocksdb_slice_t* keys, unsigned char sorted_input,
+    rocksdb_pinnablewidecolumns_t* result) {
+  ResizeEntities(result, num_keys);
+  result->column_families.resize(num_keys);
+  for (size_t i = 0; i < num_keys; ++i) {
+    result->column_families[i] = column_families[i]->rep;
+  }
+  db->rep->MultiGetEntity(
+      options->rep, num_keys, result->column_families.data(),
+      reinterpret_cast<const Slice*>(keys), result->rep.data(),
+      result->statuses.data(), sorted_input);
+  return EntityEntries(result);
+}
+
 unsigned char rocksdb_key_may_exist(rocksdb_t* db,
                                     const rocksdb_readoptions_t* options,
                                     const char* key, size_t key_len,
@@ -3112,6 +3211,21 @@ void rocksdb_create_iterators(rocksdb_t* db, rocksdb_readoptions_t* opts,
     iterators[i] = new rocksdb_iterator_t;
     iterators[i]->rep = res[i];
   }
+}
+
+rocksdb_iterator_t* rocksdb_create_coalescing_iterator(
+    rocksdb_t* db, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* const* column_families,
+    size_t num_column_families) {
+  std::vector<ColumnFamilyHandle*> families;
+  families.reserve(num_column_families);
+  for (size_t i = 0; i < num_column_families; ++i) {
+    families.push_back(column_families[i]->rep);
+  }
+  rocksdb_iterator_t* result = new rocksdb_iterator_t;
+  result->rep =
+      db->rep->NewCoalescingIterator(options->rep, families).release();
+  return result;
 }
 
 const rocksdb_snapshot_t* rocksdb_create_snapshot(rocksdb_t* db) {
@@ -3484,6 +3598,13 @@ rocksdb_slice_t rocksdb_iter_value_slice(const rocksdb_iterator_t* iter) {
   return result;
 }
 
+const rocksdb_widecolumn_t* rocksdb_iter_columns(
+    const rocksdb_iterator_t* iter, size_t* num_columns) {
+  const auto& columns = iter->rep->columns();
+  *num_columns = columns.size();
+  return reinterpret_cast<const rocksdb_widecolumn_t*>(columns.data());
+}
+
 rocksdb_slice_t rocksdb_iter_timestamp_slice(const rocksdb_iterator_t* iter) {
   Slice s = iter->rep->timestamp();
   rocksdb_slice_t result;
@@ -3580,6 +3701,20 @@ void rocksdb_writebatch_verify_checksum(rocksdb_writebatch_t* b,
   SaveError(errptr, b->rep.VerifyChecksum());
 }
 // END generated: c_generated_writebatch_subset.cc.inc
+
+void rocksdb_writebatch_put_entity_cf(
+    rocksdb_writebatch_t* b, rocksdb_column_family_handle_t* column_family,
+    const char* key, size_t klen, const rocksdb_widecolumn_t* columns,
+    size_t num_columns, char** errptr) {
+  WideColumns native;
+  native.reserve(num_columns);
+  for (size_t i = 0; i < num_columns; ++i) {
+    native.emplace_back(Slice(columns[i].name.data, columns[i].name.size),
+                        Slice(columns[i].value.data, columns[i].value.size));
+  }
+  SaveError(errptr,
+            b->rep.PutEntity(column_family->rep, Slice(key, klen), native));
+}
 
 void rocksdb_writebatch_put_cf_with_ts(
     rocksdb_writebatch_t* b, rocksdb_column_family_handle_t* column_family,

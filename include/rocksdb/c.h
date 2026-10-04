@@ -157,6 +157,7 @@ typedef struct rocksdb_sstfilewriter_t rocksdb_sstfilewriter_t;
 typedef struct rocksdb_ratelimiter_t rocksdb_ratelimiter_t;
 typedef struct rocksdb_perfcontext_t rocksdb_perfcontext_t;
 typedef struct rocksdb_pinnableslice_t rocksdb_pinnableslice_t;
+typedef struct rocksdb_pinnablewidecolumns_t rocksdb_pinnablewidecolumns_t;
 typedef struct rocksdb_transactiondb_options_t rocksdb_transactiondb_options_t;
 typedef struct rocksdb_transactiondb_t rocksdb_transactiondb_t;
 typedef struct rocksdb_transaction_options_t rocksdb_transaction_options_t;
@@ -188,6 +189,26 @@ typedef struct rocksdb_slice_t {
   const char* data;
   size_t size;
 } rocksdb_slice_t;
+
+/* rocksdb_widecolumn_t: one column of a wide-column entity. ABI-compatible
+ * with rocksdb::WideColumn (two rocksdb::Slice), so column arrays pass
+ * through without copying. */
+typedef struct rocksdb_widecolumn_t {
+  rocksdb_slice_t name;
+  rocksdb_slice_t value;
+} rocksdb_widecolumn_t;
+
+/* rocksdb_entity_t: one result of an entity read. code is the
+ * rocksdb::Status code: 0 found, 1 not found, anything else an error whose
+ * message rocksdb_pinnablewidecolumns_status returns. columns is valid only
+ * when code is 0, until the next read into the same holder or its
+ * destruction. */
+typedef struct rocksdb_entity_t {
+  const rocksdb_widecolumn_t* columns;
+  size_t num_columns;
+  unsigned char code;
+} rocksdb_entity_t;
+
 typedef struct rocksdb_flushjobinfo_t rocksdb_flushjobinfo_t;
 typedef struct rocksdb_compactionjobinfo_t rocksdb_compactionjobinfo_t;
 typedef struct rocksdb_subcompactionjobinfo_t rocksdb_subcompactionjobinfo_t;
@@ -731,6 +752,37 @@ extern ROCKSDB_LIBRARY_API void rocksdb_batched_multi_get_multi_cf(
     const char* const* keys_list, const size_t* keys_list_sizes,
     rocksdb_pinnableslice_t** values, char** errs, const bool sorted_input);
 
+/* Entity reads fill a caller-owned, reusable holder and return its array of
+ * results: one per key, in key order. A holder keeps its buffers between
+ * reads. */
+extern ROCKSDB_LIBRARY_API rocksdb_pinnablewidecolumns_t*
+rocksdb_pinnablewidecolumns_create(void);
+extern ROCKSDB_LIBRARY_API void rocksdb_pinnablewidecolumns_destroy(
+    rocksdb_pinnablewidecolumns_t* result);
+/* Returns the error message of result entry index; free it with
+ * rocksdb_free. */
+extern ROCKSDB_LIBRARY_API char* rocksdb_pinnablewidecolumns_status(
+    const rocksdb_pinnablewidecolumns_t* result, size_t index);
+
+extern ROCKSDB_LIBRARY_API const rocksdb_entity_t* rocksdb_get_entity_cf(
+    rocksdb_t* db, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* column_family, const char* key,
+    size_t keylen, rocksdb_pinnablewidecolumns_t* result);
+extern ROCKSDB_LIBRARY_API const rocksdb_entity_t*
+rocksdb_multi_get_entity_cf(rocksdb_t* db, const rocksdb_readoptions_t* options,
+                            rocksdb_column_family_handle_t* column_family,
+                            size_t num_keys, const rocksdb_slice_t* keys,
+                            unsigned char sorted_input,
+                            rocksdb_pinnablewidecolumns_t* result);
+/* One column family per key. An attribute-group read is this call with one
+ * (column family, key) pair per group. */
+extern ROCKSDB_LIBRARY_API const rocksdb_entity_t*
+rocksdb_multi_get_entity_multi_cf(
+    rocksdb_t* db, const rocksdb_readoptions_t* options, size_t num_keys,
+    rocksdb_column_family_handle_t* const* column_families,
+    const rocksdb_slice_t* keys, unsigned char sorted_input,
+    rocksdb_pinnablewidecolumns_t* result);
+
 // The value is only allocated (using malloc) and returned if it is found and
 // value_found isn't NULL. In that case the user is responsible for freeing it.
 extern ROCKSDB_LIBRARY_API unsigned char rocksdb_key_may_exist(
@@ -765,6 +817,12 @@ extern ROCKSDB_LIBRARY_API void rocksdb_create_iterators(
     rocksdb_t* db, rocksdb_readoptions_t* opts,
     rocksdb_column_family_handle_t** column_families,
     rocksdb_iterator_t** iterators, size_t size, char** errptr);
+
+extern ROCKSDB_LIBRARY_API rocksdb_iterator_t*
+rocksdb_create_coalescing_iterator(
+    rocksdb_t* db, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* const* column_families,
+    size_t num_column_families);
 
 extern ROCKSDB_LIBRARY_API const rocksdb_snapshot_t* rocksdb_create_snapshot(
     rocksdb_t* db);
@@ -926,6 +984,11 @@ rocksdb_iter_value_slice(const rocksdb_iterator_t* iter);
 extern ROCKSDB_LIBRARY_API rocksdb_slice_t
 rocksdb_iter_timestamp_slice(const rocksdb_iterator_t* iter);
 
+/* Columns of the current entry; a plain value is one anonymous column. The
+ * iterator must be valid. */
+extern ROCKSDB_LIBRARY_API const rocksdb_widecolumn_t* rocksdb_iter_columns(
+    const rocksdb_iterator_t* iter, size_t* num_columns);
+
 extern ROCKSDB_LIBRARY_API void rocksdb_iter_refresh(
     const rocksdb_iterator_t* iter, char** errptr);
 
@@ -1034,6 +1097,12 @@ extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_pop_save_point(
 extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_verify_checksum(
     rocksdb_writebatch_t* b, char** errptr);
 // END generated: c_generated_writebatch_subset.h.inc
+
+extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_put_entity_cf(
+    rocksdb_writebatch_t* b, rocksdb_column_family_handle_t* column_family,
+    const char* key, size_t klen, const rocksdb_widecolumn_t* columns,
+    size_t num_columns, char** errptr);
+
 extern ROCKSDB_LIBRARY_API int rocksdb_writebatch_count(rocksdb_writebatch_t*);
 extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_put_cf_with_ts(
     rocksdb_writebatch_t*, rocksdb_column_family_handle_t* column_family,
